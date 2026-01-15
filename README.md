@@ -11,13 +11,32 @@ Generate usage statistics from your [OpenAI Codex CLI](https://github.com/openai
 
 ## Requirements
 
-- Python 3.6+
-- No external dependencies (uses only standard library)
+Choose either:
+- **Python**: Python 3.6+ (no external dependencies)
+- **Go**: Go 1.18+ (no external dependencies)
 
 ## Usage
 
+### Python
+
 ```bash
 python3 generate-stats.py
+```
+
+### Go
+
+```bash
+# Build once
+go build -o codex-usage-stats
+
+# Run
+./codex-usage-stats
+```
+
+Or run directly:
+
+```bash
+go run main.go
 ```
 
 Output is written to `~/.codex/usage-statistics.md`.
