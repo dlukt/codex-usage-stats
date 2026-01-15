@@ -2,7 +2,7 @@
 """Generate Codex CLI usage statistics markdown file."""
 
 import json
-import os
+import re
 from datetime import datetime
 from collections import defaultdict
 from pathlib import Path
@@ -35,6 +35,83 @@ def parse_history():
     return daily_counts
 
 
+def parse_session_tokens(session_file):
+    """Parse a session file and return the final token counts."""
+    tokens = {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cached_input_tokens": 0,
+        "reasoning_output_tokens": 0,
+        "total_tokens": 0,
+    }
+
+    try:
+        with open(session_file, "r") as f:
+            for line in f:
+                try:
+                    entry = json.loads(line.strip())
+                    # Look for token_count in event_msg payload
+                    if entry.get("type") == "event_msg":
+                        payload = entry.get("payload", {})
+                        if payload.get("type") == "token_count":
+                            info = payload.get("info")
+                            if info and "total_token_usage" in info:
+                                usage = info["total_token_usage"]
+                                # Update with latest values (cumulative)
+                                tokens["input_tokens"] = usage.get("input_tokens", 0)
+                                tokens["output_tokens"] = usage.get("output_tokens", 0)
+                                tokens["cached_input_tokens"] = usage.get("cached_input_tokens", 0)
+                                tokens["reasoning_output_tokens"] = usage.get("reasoning_output_tokens", 0)
+                                tokens["total_tokens"] = usage.get("total_tokens", 0)
+                except json.JSONDecodeError:
+                    continue
+    except Exception:
+        pass
+
+    return tokens
+
+
+def collect_token_stats():
+    """Collect token statistics from all session files."""
+    monthly_tokens = defaultdict(lambda: {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cached_input_tokens": 0,
+        "reasoning_output_tokens": 0,
+        "total_tokens": 0,
+        "session_count": 0,
+    })
+
+    if not SESSIONS_DIR.exists():
+        return monthly_tokens
+
+    for year_dir in SESSIONS_DIR.iterdir():
+        if not year_dir.is_dir():
+            continue
+        year = year_dir.name
+
+        for month_dir in year_dir.iterdir():
+            if not month_dir.is_dir():
+                continue
+            month = month_dir.name
+            month_key = f"{year}-{month}"
+
+            for day_dir in month_dir.iterdir():
+                if not day_dir.is_dir():
+                    continue
+
+                for session_file in day_dir.glob("*.jsonl"):
+                    tokens = parse_session_tokens(session_file)
+                    monthly_tokens[month_key]["input_tokens"] += tokens["input_tokens"]
+                    monthly_tokens[month_key]["output_tokens"] += tokens["output_tokens"]
+                    monthly_tokens[month_key]["cached_input_tokens"] += tokens["cached_input_tokens"]
+                    monthly_tokens[month_key]["reasoning_output_tokens"] += tokens["reasoning_output_tokens"]
+                    monthly_tokens[month_key]["total_tokens"] += tokens["total_tokens"]
+                    monthly_tokens[month_key]["session_count"] += 1
+
+    return monthly_tokens
+
+
 def count_sessions():
     """Count session files per month."""
     monthly_sessions = defaultdict(int)
@@ -53,7 +130,6 @@ def count_sessions():
             month = month_dir.name
             month_key = f"{year}-{month}"
 
-            # Count all .jsonl files in all day subdirectories
             for day_dir in month_dir.iterdir():
                 if day_dir.is_dir():
                     monthly_sessions[month_key] += len(list(day_dir.glob("*.jsonl")))
@@ -70,16 +146,12 @@ def calculate_stats(daily_counts):
     total_messages = sum(daily_counts.values())
     active_days = len(daily_counts)
 
-    # Monthly aggregation
     monthly_messages = defaultdict(int)
     for date, count in daily_counts.items():
-        month_key = date[:7]  # YYYY-MM
+        month_key = date[:7]
         monthly_messages[month_key] += count
 
-    # Top days
     top_days = sorted(daily_counts.items(), key=lambda x: x[1], reverse=True)[:10]
-
-    # Peak stats
     peak_day = max(daily_counts.items(), key=lambda x: x[1])
     peak_month = max(monthly_messages.items(), key=lambda x: x[1])
     avg_per_day = total_messages / active_days if active_days > 0 else 0
@@ -109,15 +181,31 @@ def format_month_name(month_key):
     return dt.strftime("%b %Y")
 
 
-def generate_markdown(stats, monthly_sessions):
+def format_tokens(n):
+    """Format token count with K/M suffix."""
+    if n >= 1_000_000:
+        return f"{n/1_000_000:.1f}M"
+    elif n >= 1_000:
+        return f"{n/1_000:.1f}K"
+    return str(n)
+
+
+def generate_markdown(stats, monthly_sessions, monthly_tokens):
     """Generate the markdown report."""
     now = datetime.now().strftime("%B %d, %Y")
+
+    # Calculate total tokens
+    total_input = sum(t["input_tokens"] for t in monthly_tokens.values())
+    total_output = sum(t["output_tokens"] for t in monthly_tokens.values())
+    total_cached = sum(t["cached_input_tokens"] for t in monthly_tokens.values())
+    total_reasoning = sum(t["reasoning_output_tokens"] for t in monthly_tokens.values())
+    total_tokens = sum(t["total_tokens"] for t in monthly_tokens.values())
 
     lines = [
         "# Codex CLI Usage Statistics",
         "",
         f"**Generated**: {now}",
-        "**Data Source**: `~/.codex/history.jsonl`",
+        "**Data Source**: `~/.codex/history.jsonl` and `~/.codex/sessions/`",
         "",
         "---",
         "",
@@ -133,10 +221,22 @@ def generate_markdown(stats, monthly_sessions):
         "",
         "---",
         "",
+        "## Token Usage Summary",
+        "",
+        "| Metric | Tokens |",
+        "|--------|--------|",
+        f"| **Total Tokens** | {total_tokens:,} ({format_tokens(total_tokens)}) |",
+        f"| **Input Tokens** | {total_input:,} ({format_tokens(total_input)}) |",
+        f"| **Output Tokens** | {total_output:,} ({format_tokens(total_output)}) |",
+        f"| **Cached Input** | {total_cached:,} ({format_tokens(total_cached)}) |",
+        f"| **Reasoning Output** | {total_reasoning:,} ({format_tokens(total_reasoning)}) |",
+        "",
+        "---",
+        "",
         "## Monthly Breakdown",
         "",
-        "| Month | Messages | Sessions | Copilot Pro Quota Usage |",
-        "|-------|----------|----------|-------------------------|",
+        "| Month | Messages | Sessions | Copilot Pro % |",
+        "|-------|----------|----------|---------------|",
     ]
 
     total_sessions = 0
@@ -151,6 +251,27 @@ def generate_markdown(stats, monthly_sessions):
         f"| **Total** | **{stats['total_messages']:,}** | **{total_sessions}** | — |",
         "",
         f"*Copilot Pro allows {COPILOT_LIMIT:,} messages/month*",
+        "",
+        "---",
+        "",
+        "## Monthly Token Usage",
+        "",
+        "| Month | Total | Input | Output | Cached | Reasoning |",
+        "|-------|-------|-------|--------|--------|-----------|",
+    ])
+
+    for month_key in sorted(monthly_tokens.keys()):
+        t = monthly_tokens[month_key]
+        month_name = format_month_name(month_key)
+        lines.append(
+            f"| {month_name} | {format_tokens(t['total_tokens'])} | "
+            f"{format_tokens(t['input_tokens'])} | {format_tokens(t['output_tokens'])} | "
+            f"{format_tokens(t['cached_input_tokens'])} | {format_tokens(t['reasoning_output_tokens'])} |"
+        )
+
+    lines.extend([
+        f"| **Total** | **{format_tokens(total_tokens)}** | **{format_tokens(total_input)}** | "
+        f"**{format_tokens(total_output)}** | **{format_tokens(total_cached)}** | **{format_tokens(total_reasoning)}** |",
         "",
         "---",
         "",
@@ -172,7 +293,6 @@ def generate_markdown(stats, monthly_sessions):
         "",
     ])
 
-    # Group by month
     daily_by_month = defaultdict(list)
     for date, count in stats["daily_counts"].items():
         month_key = date[:7]
@@ -190,7 +310,7 @@ def generate_markdown(stats, monthly_sessions):
         ])
 
         for date, count in days:
-            day_part = date[8:]  # DD part
+            day_part = date[8:]
             month_abbr = datetime.strptime(date, "%Y-%m-%d").strftime("%b")
             lines.append(f"| {month_abbr} {int(day_part):02d} | {count} |")
 
@@ -236,11 +356,16 @@ def main():
     monthly_sessions = count_sessions()
     print(f"Found {sum(monthly_sessions.values())} session files")
 
+    print("Collecting token statistics from sessions (this may take a moment)...")
+    monthly_tokens = collect_token_stats()
+    total_tokens = sum(t["total_tokens"] for t in monthly_tokens.values())
+    print(f"Found {total_tokens:,} total tokens across all sessions")
+
     print("Calculating statistics...")
     stats = calculate_stats(daily_counts)
 
     print("Generating markdown...")
-    markdown = generate_markdown(stats, monthly_sessions)
+    markdown = generate_markdown(stats, monthly_sessions, monthly_tokens)
 
     print(f"Writing to {OUTPUT_FILE}...")
     with open(OUTPUT_FILE, "w") as f:
